@@ -13,6 +13,7 @@ import argparse
 import asyncio
 import logging
 import logging.handlers
+import platform
 import sys
 import threading
 import tkinter as tk
@@ -86,6 +87,21 @@ def parse_args() -> AgentConfig:
     if args.no_process_monitor:
         config.process_monitor_enabled = False
     return config
+
+
+def preauthorize_camera_if_needed(camera_index: int) -> None:
+    """Resolve macOS camera authorization before CameraMonitor's background
+    thread ever touches the camera - see monitors/camera_permissions.py for
+    why this can't just happen lazily inside CameraMonitor itself (the short
+    version: AVFoundation can only show/await the permission dialog from the
+    main thread, and OpenCV's own request-and-check doesn't wait for the
+    user's answer at all). No-op on non-macOS platforms.
+    """
+    from monitors.camera_permissions import ensure_camera_authorized
+
+    granted = ensure_camera_authorized()
+    if not granted and platform.system() == "Darwin":
+        logger.warning("camera not authorized; camera/face monitoring will report CAMERA_UNAVAILABLE")
 
 
 class AgentApp:
@@ -271,6 +287,10 @@ def main() -> None:
         loop.call_soon_threadsafe(loop.stop)
         sys.exit(0)
     ui.deiconify()
+    ui.bring_to_front()
+
+    if config.camera_monitor_enabled:
+        preauthorize_camera_if_needed(config.camera_index)
 
     app = AgentApp(config, ui, loop)
 

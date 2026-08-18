@@ -39,7 +39,6 @@ class ConsentDialog(tk.Toplevel):
     def __init__(self, parent: tk.Tk, on_result: Callable[[bool], None]) -> None:
         super().__init__(parent)
         self.title("Exam Monitoring — Consent Required")
-        self.geometry("460x420")
         self.resizable(False, False)
         self.protocol("WM_DELETE_WINDOW", lambda: self._respond(False))
         self._on_result = on_result
@@ -80,7 +79,22 @@ class ConsentDialog(tk.Toplevel):
             command=lambda: self._respond(True),
         ).pack(side="left", padx=6)
 
+        # Size the window to what its content actually needs instead of a
+        # guessed fixed pixel size — a hardcoded height clipped the button
+        # row off-screen on systems where the text rendered taller (no
+        # scrollbar existed, so the buttons were simply unreachable).
+        self.update_idletasks()
+        width = self.winfo_reqwidth()
+        height = self.winfo_reqheight()
+        screen_height = self.winfo_screenheight()
+        height = min(height, screen_height - 100)
+        x = (self.winfo_screenwidth() - width) // 2
+        y = (screen_height - height) // 3
+        self.geometry(f"{width}x{height}+{x}+{y}")
+
         self.grab_set()
+        self.lift()
+        self.focus_force()
 
     def _respond(self, consented: bool) -> None:
         self.grab_release()
@@ -92,7 +106,6 @@ class AgentWindow(tk.Tk):
     def __init__(self, session_id: str, student_id: str, on_end_exam: Callable[[], None]) -> None:
         super().__init__()
         self.title("Exam Proctoring Agent")
-        self.geometry("380x460")
         self.resizable(False, False)
         self._on_end_exam = on_end_exam
         self._queue: "queue.Queue[dict]" = queue.Queue()
@@ -133,7 +146,23 @@ class AgentWindow(tk.Tk):
             command=self._handle_end_exam,
         ).pack(fill="x", padx=16, pady=16)
 
+        self.update_idletasks()
+        width = self.winfo_reqwidth()
+        height = self.winfo_reqheight()
+        x = (self.winfo_screenwidth() - width) // 2
+        y = (self.winfo_screenheight() - height) // 3
+        self.geometry(f"{width}x{height}+{x}+{y}")
+
         self.after(150, self._poll_queue)
+
+    def bring_to_front(self) -> None:
+        """Force this window to become the active/frontmost one. Needed because a
+        window launched from a background/automated process doesn't automatically
+        get OS-level focus on macOS even though it's visibly drawn on screen."""
+        self.lift()
+        self.attributes("-topmost", True)
+        self.after(200, lambda: self.attributes("-topmost", False))
+        self.focus_force()
 
     def _add_static_row(self, parent: tk.Frame, key: str, label: str, initial: str = "—") -> None:
         row = tk.Frame(parent)

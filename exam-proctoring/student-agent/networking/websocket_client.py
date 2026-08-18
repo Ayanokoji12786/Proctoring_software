@@ -142,23 +142,29 @@ class WebSocketClient:
                     # waits for every task to finish, so the sender/heartbeat loops (which
                     # run forever) would hang indefinitely after a clean disconnect and the
                     # client would never notice it needed to reconnect.
+                    #
+                    # The cleanup lives in `finally`, not just after `asyncio.wait`: if this
+                    # whole run() coroutine is itself cancelled from outside (e.g. stop())
+                    # while suspended at that await, the CancelledError propagates through
+                    # immediately and skips any cleanup code that isn't in a finally block -
+                    # leaving the sender/heartbeat sub-tasks orphaned (pending forever,
+                    # logged by asyncio as "Task was destroyed but it is pending!").
                     tasks = [
                         asyncio.ensure_future(self._sender_loop(ws)),
                         asyncio.ensure_future(self._heartbeat_loop(ws)),
                         asyncio.ensure_future(self._receiver_loop(ws)),
                     ]
-                    done, pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-                    for task in pending:
-                        task.cancel()
-                    for task in pending:
-                        try:
-                            await task
-                        except (asyncio.CancelledError, Exception):
-                            pass
-                    for task in done:
-                        exc = task.exception()
-                        if exc is not None:
-                            raise exc
+                    try:
+                        done, _pending = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+                        for task in done:
+                            exc = task.exception()
+                            if exc is not None:
+                                raise exc
+                    finally:
+                        for task in tasks:
+                            if not task.done():
+                                task.cancel()
+                        await asyncio.gather(*tasks, return_exceptions=True)
             except (ConnectionClosed, InvalidStatus, OSError, asyncio.TimeoutError) as exc:
                 logger.warning("websocket connection lost (%s); reconnecting in %.1fs", exc, backoff)
             except Exception:
