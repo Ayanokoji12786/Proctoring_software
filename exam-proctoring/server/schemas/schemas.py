@@ -140,9 +140,18 @@ class EventMessage(BaseModel):
 # ---- REST schemas ----
 
 
+# Session and student ids become path components under the evidence storage
+# directory, so they must not be able to escape it. Requiring the first
+# character to be alphanumeric (rather than just allowlisting the character
+# set) is what rules out "." and ".." - both of which are made up entirely of
+# otherwise-permitted characters and would traverse upward. Also keeps ids
+# safe to embed in URLs and filenames.
+SAFE_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+
+
 class CreateSessionRequest(BaseModel):
-    name: str
-    session_id: Optional[str] = None
+    name: str = Field(min_length=1, max_length=200)
+    session_id: Optional[str] = Field(default=None, pattern=SAFE_ID_PATTERN)
 
 
 class CreateSessionResponse(BaseModel):
@@ -152,9 +161,9 @@ class CreateSessionResponse(BaseModel):
 
 
 class EnrollRequest(BaseModel):
-    session_id: str
-    student_id: str
-    display_name: str
+    session_id: str = Field(pattern=SAFE_ID_PATTERN)
+    student_id: str = Field(pattern=SAFE_ID_PATTERN)
+    display_name: str = Field(min_length=1, max_length=200)
 
 
 class EnrollResponse(BaseModel):

@@ -9,6 +9,7 @@ const state = {
   sessionId: "",
   examName: "",
   ws: null,
+  authenticated: false,
   reconnectAttempt: 0,
   reconnectTimer: null,
   manuallyDisconnected: false,
@@ -141,26 +142,51 @@ function showConnectError(msg) {
 
 function openWebSocket() {
   setServerStatus("connecting", "Connecting…");
-  const ws = new WebSocket(`${state.wsUrl}/ws/admin?api_key=${encodeURIComponent(state.adminKey)}`);
+  // The admin key is sent in an AUTH frame rather than the URL: query strings
+  // land in server access logs, browser history, and proxy logs in plaintext.
+  const ws = new WebSocket(`${state.wsUrl}/ws/admin`);
   state.ws = ws;
+  state.authenticated = false;
 
   ws.onopen = () => {
-    state.reconnectAttempt = 0;
-    setServerStatus("online", "Connected");
-    EL.connectModal.hidden = true;
-    EL.app.hidden = false;
-    EL.connectError.hidden = true;
+    ws.send(JSON.stringify({ type: "AUTH", api_key: state.adminKey, session_id: state.sessionId }));
   };
 
   ws.onmessage = (evt) => {
     let msg;
     try { msg = JSON.parse(evt.data); } catch (e) { return; }
+
+    if (!state.authenticated) {
+      if (msg.type === "AUTH_OK") {
+        state.authenticated = true;
+        state.reconnectAttempt = 0;
+        setServerStatus("online", "Connected");
+        EL.connectModal.hidden = true;
+        EL.app.hidden = false;
+        EL.connectError.hidden = true;
+        return;
+      }
+      if (msg.type === "AUTH_FAILED") {
+        // Bad credentials or a missing session won't fix themselves on retry,
+        // so drop back to the connect form instead of reconnect-looping.
+        state.manuallyDisconnected = true;
+        setServerStatus("offline", "Not connected");
+        EL.app.hidden = true;
+        EL.connectModal.hidden = false;
+        showConnectError(msg.reason || "Authentication failed.");
+        ws.close();
+        return;
+      }
+      return;
+    }
+
     handleServerMessage(msg);
   };
 
   ws.onerror = () => { /* onclose handles reconnect */ };
 
   ws.onclose = () => {
+    state.authenticated = false;
     if (state.manuallyDisconnected) return;
     setServerStatus("offline", "Disconnected — retrying…");
     scheduleReconnect();
@@ -173,18 +199,28 @@ function scheduleReconnect() {
   state.reconnectTimer = setTimeout(openWebSocket, backoff);
 }
 
+// The server scopes every stream to the session this dashboard authenticated
+// for; this is a second, client-side check so a payload for another exam can
+// never render here even if that ever regressed server-side.
+function belongsToThisSession(sessionId) {
+  return !sessionId || sessionId === state.sessionId;
+}
+
 function handleServerMessage(msg) {
   switch (msg.type) {
     case "SNAPSHOT":
       state.students.clear();
-      for (const s of msg.students || []) state.students.set(s.student_id, s);
-      state.events = (msg.recent_events || []).slice().reverse();
+      for (const s of msg.students || []) {
+        if (belongsToThisSession(s.session_id)) state.students.set(s.student_id, s);
+      }
+      state.events = (msg.recent_events || []).filter((e) => belongsToThisSession(e.session_id)).reverse();
       state.events.forEach((e) => state.knownEventTypes.add(e.event_type));
       refreshEventTypeFilterOptions();
       renderAll();
       break;
     case "STUDENT_STATUS": {
       const { type, ...student } = msg;
+      if (!belongsToThisSession(student.session_id)) break;
       state.students.set(student.student_id, student);
       renderStudentGrid();
       renderHeaderStats();
@@ -193,6 +229,7 @@ function handleServerMessage(msg) {
     }
     case "PROCTOR_EVENT": {
       const event = msg.payload;
+      if (!belongsToThisSession(event.session_id)) break;
       state.events.unshift(event);
       if (state.events.length > state.maxEvents) state.events.pop();
       state.knownEventTypes.add(event.event_type);

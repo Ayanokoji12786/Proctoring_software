@@ -5,8 +5,11 @@ import datetime as dt
 import json
 import logging
 
+import asyncio
+
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from pydantic import ValidationError
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from auth.tokens import TokenError, verify_student_token
@@ -19,32 +22,22 @@ logger = logging.getLogger("proctoring.websocket.student")
 router = APIRouter()
 
 AUTH_TIMEOUT_SECONDS = 10
-# Bound how many event_ids we remember per student for duplicate suppression
-# after a reconnect (the agent resends its unacknowledged local queue).
-_SEEN_EVENT_CACHE_SIZE = 500
-_seen_event_ids: dict[str, set[str]] = {}
 
 
 def _now() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc)
 
 
-def _mark_seen(student_id: str, event_id: str) -> bool:
-    """Returns True if this event_id was already seen (i.e. it's a duplicate)."""
-    seen = _seen_event_ids.setdefault(student_id, set())
-    if event_id in seen:
-        return True
-    seen.add(event_id)
-    if len(seen) > _SEEN_EVENT_CACHE_SIZE:
-        # drop an arbitrary old entry to bound memory; good enough for a prototype
-        seen.pop()
-    return False
-
-
 async def _authenticate(websocket: WebSocket) -> tuple[str, str, str] | None:
     """Waits for the first AUTH frame and validates it. Returns (session_id, student_id, display_name)."""
     try:
-        raw = await websocket.receive_text()
+        # Bounded wait: an unauthenticated peer that connects and then never
+        # sends anything would otherwise hold the connection (and its server
+        # resources) open indefinitely.
+        raw = await asyncio.wait_for(websocket.receive_text(), timeout=AUTH_TIMEOUT_SECONDS)
+    except asyncio.TimeoutError:
+        logger.warning("closing websocket: no AUTH frame within %ss", AUTH_TIMEOUT_SECONDS)
+        return None
     except WebSocketDisconnect:
         return None
 
@@ -74,7 +67,7 @@ async def _authenticate(websocket: WebSocket) -> tuple[str, str, str] | None:
             return None
 
         try:
-            verify_student_token(token, session_id, student_id)
+            claims = verify_student_token(token, session_id, student_id)
         except TokenError as exc:
             await websocket.send_json({"type": "AUTH_FAILED", "reason": str(exc)})
             return None
@@ -88,6 +81,17 @@ async def _authenticate(websocket: WebSocket) -> tuple[str, str, str] | None:
             await websocket.send_json({"type": "AUTH_FAILED", "reason": "student not enrolled in this session"})
             return None
 
+        # Enforce single-token-per-enrollment. Re-enrolling a student mints a
+        # new jti and overwrites this column, so any previously issued token
+        # stops working immediately instead of staying valid for the rest of
+        # its TTL - which is the whole point of storing token_jti.
+        if student_session.token_jti and claims.get("jti") != student_session.token_jti:
+            logger.warning("rejected superseded token for student_id=%s session_id=%s", student_id, session_id)
+            await websocket.send_json(
+                {"type": "AUTH_FAILED", "reason": "token superseded by a newer enrollment; request a fresh token"}
+            )
+            return None
+
         student_session.status = "online"
         student_session.joined_at = student_session.joined_at or _now()
         student_session.last_heartbeat = _now()
@@ -97,11 +101,20 @@ async def _authenticate(websocket: WebSocket) -> tuple[str, str, str] | None:
     return session_id, student_id, display_name
 
 
-def _persist_event(payload: EventPayload) -> None:
+def _persist_event(payload: EventPayload) -> bool:
+    """Persists the event. Returns True if it was newly inserted, False if this
+    event_id was already stored (i.e. the agent resent an unacknowledged event).
+
+    The database - not an in-memory set - is the authority for deduplication.
+    An in-process cache is lost on restart, so after a server restart an agent
+    resending its unacked queue would be treated as brand new: the row insert
+    would be skipped, but the event would still be re-broadcast to dashboards
+    and counted again in the student's alert total. Returning the insert
+    outcome lets the caller skip both of those for a known event_id.
+    """
     with session_scope() as db:
-        exists = db.get(Event, payload.event_id)
-        if exists is not None:
-            return  # duplicate at the DB layer too (defense in depth)
+        if db.get(Event, payload.event_id) is not None:
+            return False
         db.add(
             Event(
                 id=payload.event_id,
@@ -114,6 +127,7 @@ def _persist_event(payload: EventPayload) -> None:
                 evidence_id=payload.evidence_id,
             )
         )
+    return True
 
 
 def _touch_heartbeat(student_id: str, session_id: str) -> None:
@@ -178,17 +192,23 @@ async def student_websocket(websocket: WebSocket) -> None:
                 if event_msg.severity not in (Severity.GREEN, Severity.YELLOW, Severity.RED):
                     event_msg.severity = Severity.YELLOW
 
-                if _mark_seen(student_id, event_msg.event_id):
-                    await websocket.send_json({"type": "EVENT_ACK", "event_id": event_msg.event_id, "duplicate": True})
+                try:
+                    is_new = _persist_event(event_msg)
+                except SQLAlchemyError:
+                    # Don't drop the connection over one bad row - the agent
+                    # keeps it queued and retries, and other events keep flowing.
+                    logger.exception("failed to persist event %s", event_msg.event_id)
+                    await websocket.send_json({"type": "ERROR", "reason": "event could not be stored; will retry"})
                     continue
 
-                _persist_event(event_msg)
-                event_dict = json.loads(event_msg.model_dump_json())
-                await manager.record_event(event_dict)
-                await websocket.send_json({"type": "EVENT_ACK", "event_id": event_msg.event_id, "duplicate": False})
+                if is_new:
+                    await manager.record_event(json.loads(event_msg.model_dump_json()))
+                await websocket.send_json(
+                    {"type": "EVENT_ACK", "event_id": event_msg.event_id, "duplicate": not is_new}
+                )
 
             elif msg_type == "HEARTBEAT":
-                manager.record_heartbeat(student_id)
+                manager.record_heartbeat(student_id, session_id)
                 _touch_heartbeat(student_id, session_id)
                 await websocket.send_json({"type": "HEARTBEAT_ACK", "timestamp": _now().isoformat()})
 
@@ -213,5 +233,5 @@ async def student_websocket(websocket: WebSocket) -> None:
     except WebSocketDisconnect:
         logger.info("student disconnected student_id=%s session_id=%s", student_id, session_id)
     finally:
-        await manager.disconnect_student(student_id)
+        await manager.disconnect_student(student_id, session_id, websocket)
         _mark_offline(student_id, session_id)

@@ -52,6 +52,7 @@ class WebSocketClient:
         self._sent_this_connection: set[str] = set()
         self._send_signal = asyncio.Event()
         self._stop_event = asyncio.Event()
+        self._session_ended = False
         self._on_status_change = on_status_change or (lambda s: None)
         self._on_event_acked = on_event_acked or (lambda eid: None)
         self._load_persisted_queue()
@@ -63,6 +64,11 @@ class WebSocketClient:
     @property
     def queued_count(self) -> int:
         return len(self._pending)
+
+    @property
+    def session_ended(self) -> bool:
+        """True if the server told us the proctor ended this exam session."""
+        return self._session_ended
 
     # ---------------- durable local queue ----------------
 
@@ -202,12 +208,18 @@ class WebSocketClient:
 
     async def _sender_loop(self, ws) -> None:
         while True:
+            # Clear BEFORE reading the queue, not after sending. `ws.send()`
+            # suspends, so an event enqueued while a send is in flight sets the
+            # signal; clearing afterwards would wipe that set() and the loop
+            # would block in wait() with an unsent event still queued - stuck
+            # until some *later* event happened to wake it. Clearing first means
+            # any set() from that window survives and wait() returns at once.
+            self._send_signal.clear()
             unsent = [e for eid, e in self._pending.items() if eid not in self._sent_this_connection]
             for event in unsent:
                 await ws.send(json.dumps({"type": "EVENT", "payload": json.loads(event.model_dump_json())}))
                 self._sent_this_connection.add(event.event_id)
                 logger.debug("sent event %s (%s)", event.event_id, event.event_type.value)
-            self._send_signal.clear()
             await self._send_signal.wait()
 
     async def _heartbeat_loop(self, ws) -> None:
@@ -232,5 +244,12 @@ class WebSocketClient:
                     self._on_event_acked(event_id)
             elif msg_type == "HEARTBEAT_ACK":
                 pass
+            elif msg_type == "SESSION_ENDED":
+                # The proctor ended the exam. Stop for good rather than
+                # reconnect-looping against a session that will keep refusing us.
+                logger.info("server reported the exam session has ended; stopping agent")
+                self._session_ended = True
+                self._stop_event.set()
+                return
             elif msg_type == "ERROR":
                 logger.warning("server reported error: %s", data.get("reason"))

@@ -37,15 +37,24 @@ async def _heartbeat_watchdog() -> None:
     while True:
         await asyncio.sleep(HEARTBEAT_CHECK_INTERVAL)
         try:
-            for student_id in manager.offline_candidates(settings.heartbeat_timeout_seconds):
-                logger.warning("student heartbeat timeout, marking offline: %s", student_id)
-                state = manager.states.get(student_id)
-                manager.student_sockets.pop(student_id, None)
+            for session_id, student_id in manager.offline_candidates(settings.heartbeat_timeout_seconds):
+                logger.warning(
+                    "student heartbeat timeout, marking offline: student_id=%s session_id=%s", student_id, session_id
+                )
+                state = manager.get_state(student_id, session_id)
+                manager.student_sockets.pop((session_id, student_id), None)
                 if state:
                     state.status = "offline"
                     await manager.broadcast_status(state)
                 with session_scope() as db:
-                    for ss in db.query(StudentSession).filter_by(student_id=student_id, status="online").all():
+                    # Scoped to the timed-out enrollment only: a student enrolled
+                    # in more than one exam must not be marked offline in all of
+                    # them because one went quiet.
+                    for ss in (
+                        db.query(StudentSession)
+                        .filter_by(student_id=student_id, session_id=session_id, status="online")
+                        .all()
+                    ):
                         ss.status = "offline"
                         ss.left_at = dt.datetime.now(dt.timezone.utc)
         except Exception:
@@ -79,13 +88,34 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
 
+# `allow_credentials=True` combined with a wildcard origin is an invalid (and
+# unsafe) CORS configuration: Starlette then reflects whatever Origin the
+# caller sends, which is strictly weaker than the wildcard it looks like. This
+# API authenticates with an explicit header rather than cookies, so credentialed
+# cross-origin requests aren't needed at all when origins are wildcarded.
+_wildcard_origins = "*" in settings.cors_allow_origins_list
+if _wildcard_origins:
+    logger.warning(
+        "CORS is configured to allow all origins - set CORS_ALLOW_ORIGINS to your "
+        "dashboard's origin before exposing this server publicly"
+    )
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_allow_origins_list,
-    allow_credentials=True,
+    allow_credentials=not _wildcard_origins,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def _security_headers(request, call_next):
+    response = await call_next(request)
+    # Evidence is served with a client-supplied content type; nosniff stops a
+    # browser from re-interpreting a stored file as something executable.
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("Referrer-Policy", "no-referrer")
+    return response
 
 
 @app.middleware("http")

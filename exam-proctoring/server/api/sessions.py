@@ -35,13 +35,24 @@ def create_session(req: CreateSessionRequest, db: Session = Depends(get_db)) -> 
 
 
 @router.post("/sessions/{session_id}/end")
-def end_session(session_id: str, db: Session = Depends(get_db)) -> dict:
+async def end_session(session_id: str, db: Session = Depends(get_db)) -> dict:
     exam_session = db.get(ExamSession, session_id)
     if exam_session is None:
         raise HTTPException(status_code=404, detail="session not found")
     exam_session.ended_at = dt.datetime.now(dt.timezone.utc)
+
+    # Mark every enrollment offline so the DB doesn't keep claiming students are
+    # connected to an exam that is over.
+    for student_session in db.query(StudentSession).filter_by(session_id=session_id, status="online").all():
+        student_session.status = "offline"
+        student_session.left_at = exam_session.ended_at
     db.commit()
-    return {"session_id": session_id, "ended_at": exam_session.ended_at}
+
+    # Ending the exam has to actually stop monitoring: rejecting *new*
+    # connections isn't enough while already-connected agents keep streaming.
+    disconnected = await manager.close_session(session_id)
+
+    return {"session_id": session_id, "ended_at": exam_session.ended_at, "agents_disconnected": disconnected}
 
 
 @router.get("/sessions")
@@ -94,7 +105,7 @@ def list_students(session_id: str, db: Session = Depends(get_db)) -> list[Studen
     results: list[StudentStatusOut] = []
     for student_session in db.query(StudentSession).filter_by(session_id=session_id).all():
         student = db.get(Student, student_session.student_id)
-        live_state = manager.states.get(student_session.student_id)
+        live_state = manager.get_state(student_session.student_id, session_id)
         if live_state:
             results.append(
                 StudentStatusOut(

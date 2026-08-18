@@ -111,6 +111,38 @@ async def test_event_is_resent_after_reconnect_and_eventually_acked(agent_config
 
 
 @pytest.mark.asyncio
+async def test_event_enqueued_during_an_in_flight_send_is_still_delivered(agent_config):
+    """Regression (lost wakeup): ws.send() suspends, so an event enqueued while a
+    send is in flight sets the send signal. Clearing the signal *after* sending
+    wiped that set(), leaving the loop blocked in wait() with an unsent event
+    still queued - stuck until some later event happened to wake it."""
+    from networking.websocket_client import WebSocketClient
+
+    class SlowWS:
+        """Stands in for a real link where send() actually suspends."""
+
+        def __init__(self):
+            self.sent = []
+
+        async def send(self, data):
+            await asyncio.sleep(0.15)
+            self.sent.append(data)
+
+    client = WebSocketClient(agent_config)
+    ws = SlowWS()
+    sender = asyncio.ensure_future(client._sender_loop(ws))
+    try:
+        client.enqueue_event(_sample_event(agent_config, "aaaaaaaa-0000-0000-0000-00000000000a"))
+        await asyncio.sleep(0.05)  # sender is now suspended inside send() of the first event
+        client.enqueue_event(_sample_event(agent_config, "bbbbbbbb-0000-0000-0000-00000000000b"))
+
+        await asyncio.sleep(1.0)
+        assert len(ws.sent) == 2, "the event enqueued mid-send was never delivered"
+    finally:
+        sender.cancel()
+
+
+@pytest.mark.asyncio
 async def test_auth_failure_does_not_retry_forever(agent_config):
     from networking.websocket_client import ConnectionStatus, WebSocketClient
 

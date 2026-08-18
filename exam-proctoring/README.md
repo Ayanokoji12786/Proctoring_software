@@ -356,7 +356,19 @@ a scripted example to adapt.
 **Server → Student**: `AUTH_OK` / `AUTH_FAILED` / `EVENT_ACK` (with
 `duplicate: true|false`) / `HEARTBEAT_ACK` / `ERROR`.
 
-**Server → Admin** (`/ws/admin?api_key=...`):
+**Admin → Server** (`/ws/admin`), first frame must be `AUTH`. The admin key is
+sent in this frame rather than as a `?api_key=` query parameter, because query
+strings are written verbatim into web-server access logs, browser history, and
+proxy logs:
+
+```json
+{"type": "AUTH", "api_key": "<admin api key>", "session_id": "exam_101"}
+```
+
+The server replies `AUTH_OK` (or `AUTH_FAILED`), then immediately sends a
+`SNAPSHOT`. Every subsequent message is scoped to that one `session_id`.
+
+**Server → Admin**:
 
 ```json
 {"type": "SNAPSHOT", "students": [...], "recent_events": [...]}
@@ -364,9 +376,14 @@ a scripted example to adapt.
 {"type": "PROCTOR_EVENT", "payload": { "...": "event fields..." }}
 ```
 
-**Admin → Server**: `{"type": "REQUEST_SNAPSHOT"}` and
-`{"type": "ACK_STUDENT", "student_id": "..."}` (clears a student's alert
-count/severity after proctor review).
+After the handshake, **Admin → Server** also accepts
+`{"type": "REQUEST_SNAPSHOT"}` and `{"type": "ACK_STUDENT", "student_id": "..."}`
+(clears a student's alert count/severity after proctor review; scoped to the
+dashboard's own session).
+
+**Server → Student**, additionally: `SESSION_ENDED` is pushed to every
+connected agent when a proctor ends the exam, and the agent shuts down rather
+than reconnecting — monitoring must not outlive the session.
 
 Event types: `WINDOW_FOCUS_CHANGED`, `BROWSER_FOCUS_LOST`,
 `APPLICATION_CHANGED`, `WINDOW_MONITOR_UNAVAILABLE`,

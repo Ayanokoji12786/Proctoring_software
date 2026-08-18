@@ -95,10 +95,19 @@ def test_event_rejected_for_student_session_mismatch(client, admin_headers):
         assert resp["type"] == "ERROR"
 
 
+def _admin_connect(client, session_id, api_key="test-admin-key"):
+    """Opens an authenticated admin socket and returns it past the AUTH handshake."""
+    ws = client.websocket_connect("/ws/admin").__enter__()
+    ws.send_json({"type": "AUTH", "api_key": api_key, "session_id": session_id})
+    return ws
+
+
 def test_admin_receives_snapshot_and_live_broadcast(client, admin_headers):
     token = _create_session_and_student(client, admin_headers, "exam_ws_6", "s6", name="Broadcast Student")
 
-    with client.websocket_connect("/ws/admin?api_key=test-admin-key") as admin_ws:
+    with client.websocket_connect("/ws/admin") as admin_ws:
+        admin_ws.send_json({"type": "AUTH", "api_key": "test-admin-key", "session_id": "exam_ws_6"})
+        assert admin_ws.receive_json()["type"] == "AUTH_OK"
         snapshot = admin_ws.receive_json()
         assert snapshot["type"] == "SNAPSHOT"
 
@@ -125,10 +134,133 @@ def test_admin_receives_snapshot_and_live_broadcast(client, admin_headers):
             assert status_update["alert_count"] == 1
 
 
-def test_admin_websocket_rejects_bad_api_key(client):
-    import pytest
-    from starlette.websockets import WebSocketDisconnect
+def test_admin_websocket_rejects_bad_api_key(client, admin_headers):
+    _create_session_and_student(client, admin_headers, "exam_ws_7", "s7")
+    with client.websocket_connect("/ws/admin") as ws:
+        ws.send_json({"type": "AUTH", "api_key": "wrong-key", "session_id": "exam_ws_7"})
+        resp = ws.receive_json()
+        assert resp["type"] == "AUTH_FAILED"
+        assert "invalid admin API key" in resp["reason"]
 
-    with pytest.raises(WebSocketDisconnect):
-        with client.websocket_connect("/ws/admin?api_key=wrong-key"):
-            pass
+
+def test_admin_websocket_rejects_unknown_session(client):
+    with client.websocket_connect("/ws/admin") as ws:
+        ws.send_json({"type": "AUTH", "api_key": "test-admin-key", "session_id": "no_such_exam"})
+        resp = ws.receive_json()
+        assert resp["type"] == "AUTH_FAILED"
+        assert "not found" in resp["reason"]
+
+
+def test_admin_only_receives_events_for_its_own_session(client, admin_headers):
+    """Regression: a proctor watching one exam must never receive another exam's
+    students or events (the manager previously broadcast globally)."""
+    _create_session_and_student(client, admin_headers, "exam_iso_a", "iso_a", name="Alice")
+    token_b = _create_session_and_student(client, admin_headers, "exam_iso_b", "iso_b", name="Bob")
+
+    with client.websocket_connect("/ws/admin") as admin_a:
+        admin_a.send_json({"type": "AUTH", "api_key": "test-admin-key", "session_id": "exam_iso_a"})
+        assert admin_a.receive_json()["type"] == "AUTH_OK"
+        assert admin_a.receive_json()["type"] == "SNAPSHOT"
+
+        # A student in the *other* exam connects and emits a high-severity event
+        with client.websocket_connect("/ws/student") as student_b:
+            student_b.send_json({"type": "AUTH", "session_id": "exam_iso_b", "student_id": "iso_b", "token": token_b})
+            student_b.receive_json()
+            student_b.send_json(
+                _event_payload("exam_iso_b", "iso_b", "99999999-9999-9999-9999-999999999999", severity="red")
+            )
+            student_b.receive_json()  # ack
+
+        # Nothing about exam_iso_b may reach the exam_iso_a dashboard.
+        with client.websocket_connect("/ws/admin") as probe:
+            probe.send_json({"type": "AUTH", "api_key": "test-admin-key", "session_id": "exam_iso_a"})
+            probe.receive_json()
+            snapshot = probe.receive_json()
+
+        assert all(s["session_id"] == "exam_iso_a" for s in snapshot["students"])
+        assert all(e["session_id"] == "exam_iso_a" for e in snapshot["recent_events"])
+
+
+def test_superseded_token_is_rejected(client, admin_headers):
+    """Regression: re-enrolling a student mints a new jti, which must invalidate
+    the previously issued token instead of leaving both valid."""
+    old_token = _create_session_and_student(client, admin_headers, "exam_revoke", "rev1")
+    new_token = client.post(
+        "/api/sessions/exam_revoke/students",
+        json={"session_id": "exam_revoke", "student_id": "rev1", "display_name": "Student"},
+        headers=admin_headers,
+    ).json()["token"]
+    assert old_token != new_token
+
+    with client.websocket_connect("/ws/student") as ws:
+        ws.send_json({"type": "AUTH", "session_id": "exam_revoke", "student_id": "rev1", "token": new_token})
+        assert ws.receive_json()["type"] == "AUTH_OK"
+
+    with client.websocket_connect("/ws/student") as ws:
+        ws.send_json({"type": "AUTH", "session_id": "exam_revoke", "student_id": "rev1", "token": old_token})
+        resp = ws.receive_json()
+        assert resp["type"] == "AUTH_FAILED"
+        assert "superseded" in resp["reason"]
+
+
+def test_ending_a_session_disconnects_connected_agents(client, admin_headers):
+    """Monitoring must actually stop when the exam ends - refusing only *new*
+    connections would leave already-connected agents streaming indefinitely."""
+    from websocket.manager import manager
+
+    token = _create_session_and_student(client, admin_headers, "exam_endclose", "ec1")
+
+    with client.websocket_connect("/ws/student") as ws:
+        ws.send_json({"type": "AUTH", "session_id": "exam_endclose", "student_id": "ec1", "token": token})
+        assert ws.receive_json()["type"] == "AUTH_OK"
+        assert ("exam_endclose", "ec1") in manager.student_sockets
+
+        resp = client.post("/api/sessions/exam_endclose/end", headers=admin_headers)
+        assert resp.status_code == 200
+        assert resp.json()["agents_disconnected"] == 1
+
+        assert ws.receive_json()["type"] == "SESSION_ENDED"
+
+    # In-memory state for the finished session is released, not retained forever.
+    assert ("exam_endclose", "ec1") not in manager.student_sockets
+    assert manager.get_state("ec1", "exam_endclose") is None
+
+
+def test_cannot_connect_to_an_ended_session(client, admin_headers):
+    token = _create_session_and_student(client, admin_headers, "exam_ended2", "ee1")
+    client.post("/api/sessions/exam_ended2/end", headers=admin_headers)
+
+    with client.websocket_connect("/ws/student") as ws:
+        ws.send_json({"type": "AUTH", "session_id": "exam_ended2", "student_id": "ee1", "token": token})
+        resp = ws.receive_json()
+        assert resp["type"] == "AUTH_FAILED"
+        assert "ended" in resp["reason"]
+
+
+def test_resent_event_is_not_double_counted_after_cache_loss(client, admin_headers):
+    """Regression: dedup must be DB-backed. An in-memory-only cache is lost on
+    restart, so a resent unacked event would be re-broadcast and counted twice."""
+    from websocket.manager import manager
+
+    token = _create_session_and_student(client, admin_headers, "exam_dedup", "dd1")
+    event_id = "77777777-7777-7777-7777-777777777777"
+
+    with client.websocket_connect("/ws/student") as ws:
+        ws.send_json({"type": "AUTH", "session_id": "exam_dedup", "student_id": "dd1", "token": token})
+        ws.receive_json()
+        ws.send_json(_event_payload("exam_dedup", "dd1", event_id, severity="red"))
+        assert ws.receive_json()["duplicate"] is False
+
+    state = manager.get_state("dd1", "exam_dedup")
+    count_after_first = state.alert_count
+
+    # Reconnect and resend the same event, as the agent does for unacked items.
+    with client.websocket_connect("/ws/student") as ws:
+        ws.send_json({"type": "AUTH", "session_id": "exam_dedup", "student_id": "dd1", "token": token})
+        ws.receive_json()
+        ws.send_json(_event_payload("exam_dedup", "dd1", event_id, severity="red"))
+        assert ws.receive_json()["duplicate"] is True
+
+    assert manager.get_state("dd1", "exam_dedup").alert_count == count_after_first
+    rows = client.get("/api/events", params={"session_id": "exam_dedup"}, headers=admin_headers).json()
+    assert len([e for e in rows if e["event_id"] == event_id]) == 1
