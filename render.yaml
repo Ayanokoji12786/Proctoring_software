@@ -1,0 +1,23 @@
+# Render Blueprint for the proctoring server (free tier).
+#
+# Repo root is this file's directory; the actual app lives one level down in
+# exam-proctoring/, so dockerContext/dockerfilePath point in there.
+#
+# NOTE on Render's free tier: it spins down after ~15 minutes of no HTTP
+# traffic, and does NOT include a persistent disk (that needs a paid plan).
+# This means the SQLite DB / evidence snapshots reset whenever the service
+# spins down and back up. Fine for "keep it running for one study session,"
+# not fine for long-term history across days — see README for details.
+services:
+  - type: web
+    name: exam-proctoring-server
+    runtime: docker
+    plan: free
+    dockerContext: ./exam-proctoring
+    dockerfilePath: ./exam-proctoring/server/Dockerfile
+    healthCheckPath: /api/health
+    envVars:
+      - key: JWT_SECRET
+        generateValue: true
+      - key: ADMIN_API_KEY
+        generateValue: true
