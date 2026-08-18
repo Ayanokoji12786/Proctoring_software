@@ -1,0 +1,30 @@
+# Runs the FastAPI server (which also serves the Admin Dashboard static
+# files at /dashboard). The Student Agent is intentionally NOT included here
+# — it's a desktop app that needs direct access to the student's own camera,
+# active window, and display configuration, which isn't something you run
+# inside a container. Run it natively per the README's setup instructions.
+services:
+  server:
+    build:
+      context: .
+      dockerfile: server/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      # Fine for local evaluation; override for anything else. See
+      # server/.env.example for the full list of options, and uncomment the
+      # env_file line below to load your own overrides from server/.env.
+      DATABASE_URL: sqlite:///./data/proctoring.db
+      EVIDENCE_STORAGE_DIR: ./evidence_storage
+      JWT_SECRET: CHANGE_ME_DEV_SECRET_DO_NOT_USE_IN_PRODUCTION
+      ADMIN_API_KEY: CHANGE_ME_ADMIN_KEY
+    # env_file:
+    #   - server/.env
+    volumes:
+      - proctoring_data:/app/server/data
+      - proctoring_evidence:/app/server/evidence_storage
+    restart: unless-stopped
+
+volumes:
+  proctoring_data:
+  proctoring_evidence:

@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Exam Monitor — Proctoring Dashboard</title>
+<link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+
+<!-- Connect modal: proctor supplies server + admin key + session before the dashboard can attach -->
+<div id="connect-modal" class="modal-overlay">
+  <div class="modal">
+    <h1>Exam Monitor</h1>
+    <p class="modal-subtitle">Connect to the proctoring server to begin monitoring a session.</p>
+    <label>Server URL
+      <input id="input-server-url" type="text" value="http://localhost:8000" />
+    </label>
+    <label>Admin API Key
+      <input id="input-admin-key" type="password" placeholder="Admin API key" />
+    </label>
+    <label>Exam Session ID
+      <input id="input-session-id" type="text" placeholder="e.g. exam_101" />
+    </label>
+    <label>Exam Name (display only)
+      <input id="input-exam-name" type="text" placeholder="e.g. CS101 Midterm" />
+    </label>
+    <button id="btn-connect" class="btn btn-primary">Connect</button>
+    <p id="connect-error" class="modal-error" hidden></p>
+  </div>
+</div>
+
+<div id="app" hidden>
+
+  <header class="app-header">
+    <div class="header-left">
+      <span class="app-title">EXAM MONITOR</span>
+      <span class="exam-name" id="header-exam-name">—</span>
+      <span class="session-id" id="header-session-id">—</span>
+    </div>
+    <div class="header-right">
+      <div class="stat-pill"><span id="stat-total">0</span> Students</div>
+      <div class="stat-pill stat-review"><span id="stat-review">0</span> Need Review</div>
+      <div class="server-status" id="server-status">
+        <span class="dot" id="server-status-dot"></span>
+        <span id="server-status-text">Connecting…</span>
+      </div>
+      <button id="btn-disconnect" class="btn btn-ghost">Disconnect</button>
+    </div>
+  </header>
+
+  <div class="filter-bar">
+    <div class="filter-group" id="status-filters">
+      <button class="filter-chip active" data-status="all">All</button>
+      <button class="filter-chip" data-status="normal">🟢 Normal</button>
+      <button class="filter-chip" data-status="review">🟡 Needs Review</button>
+      <button class="filter-chip" data-status="critical">🔴 Critical</button>
+      <button class="filter-chip" data-status="offline">⚪ Offline</button>
+    </div>
+    <div class="filter-group filter-group-right">
+      <input id="filter-student" type="text" placeholder="Filter by student…" class="filter-input" />
+      <select id="filter-event-type" class="filter-input">
+        <option value="">All event types</option>
+      </select>
+      <select id="filter-severity" class="filter-input">
+        <option value="">All severities</option>
+        <option value="green">Green</option>
+        <option value="yellow">Yellow</option>
+        <option value="red">Red</option>
+      </select>
+    </div>
+  </div>
+
+  <main class="main-area">
+    <section class="student-grid" id="student-grid" aria-label="Students"></section>
+
+    <aside class="detail-panel" id="detail-panel" hidden>
+      <button class="detail-close" id="detail-close">&times;</button>
+      <div id="detail-content"></div>
+    </aside>
+  </main>
+
+  <section class="event-feed">
+    <div class="event-feed-header">
+      <span>LIVE EVENT FEED</span>
+      <span class="event-feed-hint">Signals are flagged for human review — not automated accusations.</span>
+    </div>
+    <div class="event-feed-list" id="event-feed-list"></div>
+  </section>
+
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

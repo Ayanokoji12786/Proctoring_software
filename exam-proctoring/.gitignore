@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.venv/
+*.egg-info/
+
+# Env files (never commit real secrets)
+.env
+
+# Server runtime data
+server/proctoring.db
+server/evidence_storage/
+
+# Student Agent runtime data
+student-agent/agent.log
+student-agent/agent.log.*
+student-agent/agent_event_queue.jsonl
+
+# OS cruft
+.DS_Store

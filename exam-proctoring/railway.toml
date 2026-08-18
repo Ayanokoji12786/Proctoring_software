@@ -1,0 +1,16 @@
+# Railway config-as-code for deploying the server. Build context is the repo
+# root (this file's directory), matching server/Dockerfile's expectations
+# (it COPYs both server/ and dashboard/).
+#
+# See README "Deploying for a remote study group" for the full walkthrough:
+# what env vars to set, how to attach a persistent volume for the SQLite DB
+# + evidence snapshots, and how to point each student's agent at the
+# deployed URL.
+
+[build]
+builder = "DOCKERFILE"
+dockerfilePath = "server/Dockerfile"
+
+[deploy]
+restartPolicyType = "ON_FAILURE"
+restartPolicyMaxRetries = 5

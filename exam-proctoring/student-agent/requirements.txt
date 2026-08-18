@@ -1,0 +1,23 @@
+opencv-python==4.10.0.84
+mediapipe==0.10.14
+numpy<2
+psutil==6.0.0
+pydantic==2.9.2
+websockets==13.1
+httpx==0.27.2
+python-dotenv==1.0.1
+
+# macOS window/display monitoring (AppKit + Quartz/CoreGraphics)
+pyobjc-framework-Cocoa==10.3.1; sys_platform == "darwin"
+pyobjc-framework-Quartz==10.3.1; sys_platform == "darwin"
+
+# Windows window monitoring
+pywin32==306; sys_platform == "win32"
+
+# Note: tkinter (the UI toolkit) ships with the standard CPython installer on
+# Windows/macOS. On Linux install your distro's package, e.g.
+# `sudo apt install python3-tk`. On Homebrew Python on macOS: `brew install python-tk`.
+
+# testing
+pytest==8.3.3
+pytest-asyncio==0.24.0
