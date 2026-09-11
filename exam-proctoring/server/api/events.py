@@ -22,7 +22,10 @@ def query_events(
     severity: str | None = None,
     since: dt.datetime | None = None,
     until: dt.datetime | None = None,
-    limit: int = Query(default=200, le=1000),
+    # ge=0 blocks the exploit (SQLite treats a negative LIMIT as "no limit at
+    # all", defeating this cap) while still allowing limit=0 as a legitimate
+    # "just tell me whether anything matches" query.
+    limit: int = Query(default=200, ge=0, le=1000),
     db: Session = Depends(get_db),
 ) -> list[dict]:
     query = db.query(Event).filter(Event.session_id == session_id)

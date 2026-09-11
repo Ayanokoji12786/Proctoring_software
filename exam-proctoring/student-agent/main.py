@@ -145,6 +145,20 @@ class AgentApp:
     def _on_ws_status(self, status: str) -> None:
         self.ui.push_update(connection=status)
         logger.info("connection status changed: %s", status)
+        if status == "connected":
+            # The student already consented locally before monitoring started
+            # (show_consent_dialog gates this); tell the server which
+            # categories so StudentSession.consent_given reflects reality
+            # instead of staying False forever. Sent on every (re)connect -
+            # harmless, since the server-side handler is idempotent.
+            categories = []
+            if self.config.window_monitor_enabled:
+                categories.append("window")
+            if self.config.display_monitor_enabled:
+                categories.append("display")
+            if self.camera_monitor is not None:
+                categories.append("camera")
+            asyncio.ensure_future(self.ws_client.send_consent(categories), loop=self.loop)
 
     # ---- EventEngine callback (asyncio loop thread) ----
     def _on_event_emitted(self, event: EventPayload) -> None:
@@ -195,11 +209,19 @@ class AgentApp:
             return
         self.window_monitor.start()
         while not self._stopped:
-            info = await self.loop.run_in_executor(None, self.window_monitor.get_active_window)
-            result = self.window_tracker.observe(info)
-            if result:
-                self._handle_signal("window", result[0], result[1])
-            self.ui.push_update(monitoring="active" if info.available else "unavailable")
+            try:
+                info = await self.loop.run_in_executor(None, self.window_monitor.get_active_window)
+                result = self.window_tracker.observe(info)
+                if result:
+                    self._handle_signal("window", result[0], result[1])
+                self.ui.push_update(monitoring="active" if info.available else "unavailable")
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # A single bad poll (flaky OS/accessibility-API call) must not
+                # permanently kill window-focus detection for the rest of the
+                # exam - log it and keep polling.
+                logger.exception("window polling iteration failed")
             await asyncio.sleep(self.config.window_poll_interval_seconds)
 
     async def _display_polling_loop(self) -> None:
@@ -207,21 +229,31 @@ class AgentApp:
             return
         self.display_monitor.start()
         while not self._stopped:
-            state = await self.loop.run_in_executor(None, self.display_monitor.get_display_state)
-            for event_type_name, metadata in self.display_tracker.observe(state):
-                severity_hint = None
-                if event_type_name == "EXTERNAL_DISPLAY_DETECTED" and self.config.treat_multi_display_as_critical:
-                    severity_hint = Severity.RED
-                self._handle_signal("display", event_type_name, metadata, severity_hint)
+            try:
+                state = await self.loop.run_in_executor(None, self.display_monitor.get_display_state)
+                for event_type_name, metadata in self.display_tracker.observe(state):
+                    severity_hint = None
+                    if event_type_name == "EXTERNAL_DISPLAY_DETECTED" and self.config.treat_multi_display_as_critical:
+                        severity_hint = Severity.RED
+                    self._handle_signal("display", event_type_name, metadata, severity_hint)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("display polling iteration failed")
             await asyncio.sleep(self.config.display_poll_interval_seconds)
 
     async def _process_polling_loop(self) -> None:
         if not self.config.process_monitor_enabled:
             return
         while not self._stopped:
-            result = await self.loop.run_in_executor(None, self.process_monitor.scan)
-            for event_type_name, metadata in self.process_tracker.observe(result):
-                self._handle_signal("process", event_type_name, metadata)
+            try:
+                result = await self.loop.run_in_executor(None, self.process_monitor.scan)
+                for event_type_name, metadata in self.process_tracker.observe(result):
+                    self._handle_signal("process", event_type_name, metadata)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                logger.exception("process polling iteration failed")
             await asyncio.sleep(self.config.process_scan_interval_seconds)
 
     async def start(self) -> None:

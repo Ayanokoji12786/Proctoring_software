@@ -78,13 +78,14 @@ class EventEngine:
     def _calculate_severity(self, signal: Signal) -> Severity:
         base = signal.severity_hint or DEFAULT_SEVERITY.get(signal.event_type, Severity.YELLOW)
 
+        # Streaks are already isolated per event_type (this dict is keyed by
+        # it), so no cross-type reset is needed here - and doing one anyway
+        # would let any unrelated signal (e.g. a single window-focus change
+        # interleaved between camera polls) zero out a persistent condition's
+        # progress before it ever reaches the 3-strikes threshold below.
         key = signal.event_type.value
         streak = self._repeat_streak.get(key, 0) + 1
         self._repeat_streak[key] = streak
-        # reset other streaks so unrelated event types don't cross-pollinate escalation
-        for other_key in list(self._repeat_streak):
-            if other_key != key:
-                self._repeat_streak[other_key] = 0
 
         # Escalate yellow -> red if the same condition has re-triggered 3+ times
         # in a row (i.e. it is persistent, not a one-off blip).

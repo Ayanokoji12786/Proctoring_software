@@ -50,7 +50,11 @@ def test_auth_failure_unknown_session(client, admin_headers):
         ws.send_json({"type": "AUTH", "session_id": "does_not_exist", "student_id": "nobody", "token": "x"})
         resp = ws.receive_json()
         assert resp["type"] == "AUTH_FAILED"
-        assert "not found" in resp["reason"]
+        # Deliberately generic: an unauthenticated peer must not be able to
+        # tell "session not found" apart from "bad token" or "not enrolled" -
+        # that distinction previously let anyone enumerate valid session/
+        # student IDs with zero valid credentials.
+        assert resp["reason"] == "authentication failed"
 
 
 def test_duplicate_event_suppressed(client, admin_headers):
@@ -200,7 +204,9 @@ def test_superseded_token_is_rejected(client, admin_headers):
         ws.send_json({"type": "AUTH", "session_id": "exam_revoke", "student_id": "rev1", "token": old_token})
         resp = ws.receive_json()
         assert resp["type"] == "AUTH_FAILED"
-        assert "superseded" in resp["reason"]
+        # Generic on the wire (see test_auth_failure_unknown_session); the
+        # specific "superseded" reason is only logged server-side now.
+        assert resp["reason"] == "authentication failed"
 
 
 def test_ending_a_session_disconnects_connected_agents(client, admin_headers):
@@ -234,7 +240,8 @@ def test_cannot_connect_to_an_ended_session(client, admin_headers):
         ws.send_json({"type": "AUTH", "session_id": "exam_ended2", "student_id": "ee1", "token": token})
         resp = ws.receive_json()
         assert resp["type"] == "AUTH_FAILED"
-        assert "ended" in resp["reason"]
+        # Generic on the wire (see test_auth_failure_unknown_session).
+        assert resp["reason"] == "authentication failed"
 
 
 def test_resent_event_is_not_double_counted_after_cache_loss(client, admin_headers):

@@ -53,6 +53,20 @@ def test_scan_detects_virtual_camera_tool(monkeypatch):
     assert result.virtual_camera_matches == ["obs64.exe"]
 
 
+def test_scan_does_not_false_positive_on_unrelated_app_containing_keyword(monkeypatch):
+    """Regression: a plain substring match against the default "obs" keyword
+    (for OBS Studio) also matched inside "obsidian" - a common, unrelated
+    note-taking app - which would immediately RED-flag an innocent student."""
+    from monitors.process_monitor import ProcessMonitor
+
+    _patch_processes(monkeypatch, ["Obsidian.exe", "Finder"])
+    monitor = ProcessMonitor(remote_access_keywords=(), virtual_camera_keywords=("obs64", "obs32", "obs"))
+
+    result = monitor.scan()
+
+    assert result.virtual_camera_matches == []
+
+
 def test_scan_detects_both_categories_simultaneously(monkeypatch):
     from monitors.process_monitor import ProcessMonitor
 

@@ -8,6 +8,7 @@ presented by the Student Agent on WebSocket connect.
 from __future__ import annotations
 
 import datetime as dt
+import hmac
 import uuid
 
 import jwt
@@ -53,12 +54,25 @@ def verify_student_token(token: str, session_id: str, student_id: str) -> dict:
     return claims
 
 
+def verify_token_not_superseded(claims: dict, current_token_jti: str | None) -> None:
+    """Raises TokenError if this token has been superseded by a newer enrollment.
+
+    Re-enrolling a student mints a new jti and overwrites token_jti on their
+    StudentSession row, so any previously issued token must stop working
+    immediately instead of remaining valid for the rest of its natural TTL.
+    Shared by every path that accepts a student token (WebSocket auth,
+    evidence upload) so revoking a token actually revokes it everywhere.
+    """
+    if current_token_jti and claims.get("jti") != current_token_jti:
+        raise TokenError("token superseded by a newer enrollment; request a fresh token")
+
+
 def require_admin_api_key(x_admin_api_key: str = Header(default="")) -> None:
     """FastAPI dependency guarding admin REST endpoints."""
-    if not x_admin_api_key or x_admin_api_key != settings.admin_api_key:
+    if not x_admin_api_key or not hmac.compare_digest(x_admin_api_key, settings.admin_api_key):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid or missing admin API key")
 
 
 def verify_admin_api_key(key: str) -> bool:
     """Used for the admin WebSocket handshake where headers aren't convenient (query param)."""
-    return bool(key) and key == settings.admin_api_key
+    return bool(key) and hmac.compare_digest(key, settings.admin_api_key)

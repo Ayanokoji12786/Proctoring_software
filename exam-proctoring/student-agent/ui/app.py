@@ -109,6 +109,14 @@ class AgentWindow(tk.Tk):
         self.resizable(False, False)
         self._on_end_exam = on_end_exam
         self._queue: "queue.Queue[dict]" = queue.Queue()
+        # Without this, Tkinter's default WM_DELETE_WINDOW behavior destroys
+        # the window immediately on the native close button - unlike the
+        # "End Exam" button, monitoring/camera/network shutdown would only
+        # happen afterward (main.py's mainloop() finally-block fallback), so
+        # the "MONITORING ACTIVE" banner would vanish while capture and
+        # transmission kept running. Routing both through the same handler
+        # keeps shutdown-before-window-closes ordering consistent either way.
+        self.protocol("WM_DELETE_WINDOW", self._handle_end_exam)
 
         self.banner = tk.Label(
             self, text="● MONITORING ACTIVE", bg="#cf222e", fg="white",

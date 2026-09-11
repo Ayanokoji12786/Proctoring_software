@@ -13,6 +13,7 @@ import asyncio
 import datetime as dt
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -90,8 +91,19 @@ class WebSocketClient:
             logger.info("resumed %d unsent event(s) from local queue", loaded)
 
     def _persist_queue(self) -> None:
+        # Write to a temp file and rename over the real path instead of
+        # writing the queue file in place: Path.write_text() opens in "w"
+        # mode, which truncates the file to zero bytes before writing the new
+        # content. A crash between the truncate and the write completing
+        # would lose every previously-durable queued event, not just fail to
+        # add the newest one - directly defeating this module's reliability
+        # contract. os.replace() is atomic on both POSIX and Windows, so
+        # readers only ever see the old complete file or the new complete
+        # file, never a partial one.
+        tmp_path = self._queue_path.with_suffix(self._queue_path.suffix + ".tmp")
         try:
-            self._queue_path.write_text("".join(p.model_dump_json() + "\n" for p in self._pending.values()))
+            tmp_path.write_text("".join(p.model_dump_json() + "\n" for p in self._pending.values()))
+            os.replace(tmp_path, self._queue_path)
         except OSError:
             logger.exception("failed to persist local event queue to disk")
 
@@ -106,6 +118,18 @@ class WebSocketClient:
         if status != self._status:
             self._status = status
             self._on_status_change(status)
+
+    async def send_consent(self, categories: list[str]) -> None:
+        """Notifies the server which data categories the student consented to.
+
+        Safe to call more than once (e.g. once per reconnect) - the server
+        handler is idempotent (it just sets a boolean flag).
+        """
+        if self._ws is not None:
+            try:
+                await self._ws.send(json.dumps({"type": "CONSENT", "categories": categories}))
+            except Exception:
+                logger.warning("failed to send consent frame", exc_info=True)
 
     async def stop(self, graceful: bool = True) -> None:
         self._stop_event.set()

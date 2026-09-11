@@ -27,6 +27,7 @@ would just be noise. Add them to the config lists if your group wants that.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -41,10 +42,20 @@ class ProcessScanResult:
     error_message: Optional[str] = None
 
 
+def _keyword_pattern(keyword: str) -> re.Pattern:
+    # Word-boundary match, not a bare substring check: a short keyword like
+    # "obs" (for OBS Studio) must not match inside an unrelated process name
+    # that merely contains it as a substring, e.g. "obsidian" (a common
+    # note-taking app, nothing to do with virtual cameras). "obs64"/"obs32"
+    # keep matching "obs64.exe" etc. since \b sits at the boundary before
+    # the extension, not inside the run of word characters.
+    return re.compile(r"\b" + re.escape(keyword) + r"\b")
+
+
 class ProcessMonitor:
     def __init__(self, remote_access_keywords: tuple[str, ...], virtual_camera_keywords: tuple[str, ...]) -> None:
-        self._remote_access_keywords = [k.lower() for k in remote_access_keywords if k.strip()]
-        self._virtual_camera_keywords = [k.lower() for k in virtual_camera_keywords if k.strip()]
+        self._remote_access_patterns = [_keyword_pattern(k.lower()) for k in remote_access_keywords if k.strip()]
+        self._virtual_camera_patterns = [_keyword_pattern(k.lower()) for k in virtual_camera_keywords if k.strip()]
 
     def scan(self) -> ProcessScanResult:
         try:
@@ -59,11 +70,11 @@ class ProcessMonitor:
                 name = (proc.info.get("name") or "").lower()
                 if not name:
                     continue
-                for keyword in self._remote_access_keywords:
-                    if keyword in name:
+                for pattern in self._remote_access_patterns:
+                    if pattern.search(name):
                         remote_matches.add(name)
-                for keyword in self._virtual_camera_keywords:
-                    if keyword in name:
+                for pattern in self._virtual_camera_patterns:
+                    if pattern.search(name):
                         camera_matches.add(name)
         except Exception as exc:  # e.g. transient permission errors enumerating some process
             return ProcessScanResult(available=False, error_message=f"process scan failed: {exc}")

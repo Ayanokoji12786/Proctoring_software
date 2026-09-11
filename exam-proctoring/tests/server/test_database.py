@@ -69,3 +69,15 @@ def test_event_persists_and_is_queryable(client, admin_headers):
     assert resp.status_code == 200
     events = resp.json()
     assert any(e["event_id"] == event_id for e in events)
+
+
+def test_events_query_rejects_negative_limit(client, admin_headers):
+    """Regression: SQLite treats a negative LIMIT as unbounded, so a negative
+    `limit` used to silently defeat the documented 1000-row cap instead of
+    being rejected."""
+    client.post("/api/sessions", json={"name": "Neg Limit", "session_id": "exam_neg_limit"}, headers=admin_headers)
+
+    resp = client.get(
+        "/api/events", params={"session_id": "exam_neg_limit", "limit": -1}, headers=admin_headers
+    )
+    assert resp.status_code == 422

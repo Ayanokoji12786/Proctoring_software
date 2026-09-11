@@ -10,7 +10,12 @@ BASE_DIR = Path(__file__).resolve().parent
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    # Anchored to this file's directory, not the process's current working
+    # directory - a relative "./.env" is resolved against whatever directory
+    # the process happened to be launched from (e.g. a different WORKDIR in
+    # Docker/systemd), which would silently skip loading .env entirely rather
+    # than erroring, leaving the well-known CHANGE_ME_* defaults below active.
+    model_config = SettingsConfigDict(env_file=str(BASE_DIR / ".env"), env_file_encoding="utf-8", extra="ignore")
 
     # General
     app_name: str = "Exam Proctoring Server"
@@ -53,3 +58,15 @@ class Settings(BaseSettings):
 
 settings = Settings()
 os.makedirs(settings.evidence_storage_dir, exist_ok=True)
+
+if settings.environment == "production":
+    # These defaults are committed in plaintext in .env.example; running
+    # production with either one still in place means anyone who has read
+    # the public repo can forge a valid student JWT (jwt_secret) or supply
+    # the known key for every admin-gated endpoint (admin_api_key). Fail
+    # loudly at startup instead of silently accepting requests signed with a
+    # secret the whole internet already has.
+    if settings.jwt_secret == "CHANGE_ME_DEV_SECRET_DO_NOT_USE_IN_PRODUCTION":
+        raise RuntimeError("ENVIRONMENT=production but JWT_SECRET is still the default placeholder - set a real secret")
+    if settings.admin_api_key == "CHANGE_ME_ADMIN_KEY":
+        raise RuntimeError("ENVIRONMENT=production but ADMIN_API_KEY is still the default placeholder - set a real key")

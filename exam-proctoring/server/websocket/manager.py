@@ -92,26 +92,31 @@ class ConnectionManager:
         state.last_heartbeat = _now()
         await self.broadcast_status(state)
 
-    async def disconnect_student(self, student_id: str, session_id: str, websocket: WebSocket | None = None) -> None:
-        """Deregisters a student connection.
+    async def disconnect_student(self, student_id: str, session_id: str, websocket: WebSocket | None = None) -> bool:
+        """Deregisters a student connection. Returns True if this call actually
+        performed the disconnect, False if it was ignored as stale.
 
         `websocket` identifies *which* connection is going away. On a fast
         reconnect the replacement socket registers before the dropped one's
         cleanup runs; without this check that late cleanup would evict the new
         socket and flip a genuinely-connected student to "offline" on the
-        dashboard. A stale socket is therefore ignored.
+        dashboard. A stale socket is therefore ignored - and callers must
+        check the return value before also updating any *other* durable state
+        (e.g. the database) for the same reason, or they'd reintroduce
+        exactly this race one layer up.
         """
         key = self._key(session_id, student_id)
         current = self.student_sockets.get(key)
         if websocket is not None and current is not None and current is not websocket:
             logger.debug("ignoring stale disconnect for %s (superseded by a newer connection)", student_id)
-            return
+            return False
 
         self.student_sockets.pop(key, None)
         state = self.states.get(key)
         if state:
             state.status = "offline"
             await self.broadcast_status(state)
+        return True
 
     def record_heartbeat(self, student_id: str, session_id: str) -> None:
         state = self.states.get(self._key(session_id, student_id))

@@ -99,6 +99,35 @@ def test_unrelated_event_types_do_not_share_escalation_streak(agent_config):
     assert event.severity == Severity.YELLOW  # first occurrence of this type, not escalated
 
 
+def test_persistent_streak_survives_an_interleaved_unrelated_event(agent_config):
+    """Regression: _calculate_severity used to zero every OTHER event type's
+    streak on every signal, so with multiple monitors polling concurrently
+    (the normal operating mode), any interleaved unrelated event reset a
+    persistent condition's progress before it ever reached 3-in-a-row and
+    escalated to RED - defeating the escalation feature almost entirely in
+    real usage."""
+    from events.schemas import EventType, Severity, Signal
+
+    agent_config.cooldown_seconds["NO_FACE_DETECTED"] = 0.02
+    agent_config.cooldown_seconds["WINDOW_FOCUS_CHANGED"] = 0.02
+    engine, emitted = _make_engine(agent_config)
+
+    no_face = Signal(source="camera", event_type=EventType.NO_FACE_DETECTED, metadata={})
+    window_changed = Signal(source="window", event_type=EventType.WINDOW_FOCUS_CHANGED, metadata={})
+
+    first = engine.process_signal(no_face)
+    time.sleep(0.03)
+    engine.process_signal(window_changed)  # unrelated event interleaved between two NO_FACE occurrences
+    time.sleep(0.03)
+    second = engine.process_signal(no_face)
+    time.sleep(0.03)
+    third = engine.process_signal(no_face)
+
+    assert first.severity == Severity.YELLOW
+    assert second.severity == Severity.YELLOW
+    assert third.severity == Severity.RED  # 3rd consecutive NO_FACE_DETECTED, despite the interleaved window event
+
+
 def test_green_severity_never_auto_escalates(agent_config):
     from events.schemas import EventType, Severity, Signal
 

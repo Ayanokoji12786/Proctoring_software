@@ -37,24 +37,39 @@ async def _heartbeat_watchdog() -> None:
     while True:
         await asyncio.sleep(HEARTBEAT_CHECK_INTERVAL)
         try:
-            for session_id, student_id in manager.offline_candidates(settings.heartbeat_timeout_seconds):
+            candidates = manager.offline_candidates(settings.heartbeat_timeout_seconds)
+            for session_id, student_id in candidates:
+                # Re-check freshness right before acting, not just at the top
+                # of this iteration: awaiting broadcast_status() for an
+                # earlier candidate yields control back to the event loop,
+                # which is long enough for THIS student to reconnect and
+                # refresh their heartbeat. Acting on the stale snapshot alone
+                # would evict a socket that was just re-registered and flip a
+                # genuinely-online student back to "offline".
+                cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(seconds=settings.heartbeat_timeout_seconds)
+                state = manager.get_state(student_id, session_id)
+                if state is None or state.status != "online" or not state.last_heartbeat or state.last_heartbeat >= cutoff:
+                    continue
+
                 logger.warning(
                     "student heartbeat timeout, marking offline: student_id=%s session_id=%s", student_id, session_id
                 )
-                state = manager.get_state(student_id, session_id)
                 manager.student_sockets.pop((session_id, student_id), None)
-                if state:
-                    state.status = "offline"
-                    await manager.broadcast_status(state)
+                state.status = "offline"
+                await manager.broadcast_status(state)
                 with session_scope() as db:
                     # Scoped to the timed-out enrollment only: a student enrolled
                     # in more than one exam must not be marked offline in all of
-                    # them because one went quiet.
+                    # them because one went quiet. Re-check last_heartbeat here
+                    # too - the DB row can have been refreshed by a reconnect
+                    # even more recently than the in-memory state was.
                     for ss in (
                         db.query(StudentSession)
                         .filter_by(student_id=student_id, session_id=session_id, status="online")
                         .all()
                     ):
+                        if ss.last_heartbeat and ss.last_heartbeat >= cutoff:
+                            continue
                         ss.status = "offline"
                         ss.left_at = dt.datetime.now(dt.timezone.utc)
         except Exception:

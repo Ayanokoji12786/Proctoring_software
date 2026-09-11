@@ -12,7 +12,7 @@ from pydantic import ValidationError
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from auth.tokens import TokenError, verify_student_token
+from auth.tokens import TokenError, verify_student_token, verify_token_not_superseded
 from database.db import session_scope
 from models.models import Event, ExamSession, Student, StudentSession
 from schemas.schemas import EventPayload, Severity
@@ -55,21 +55,33 @@ async def _authenticate(websocket: WebSocket) -> tuple[str, str, str] | None:
     student_id = data.get("student_id", "")
     token = data.get("token", "")
 
+    # Every failure below returns the same generic reason to the client - an
+    # unauthenticated peer presenting no valid token must not be able to
+    # distinguish "session not found", "student not enrolled", "bad token",
+    # and "token superseded" from each other, since the distinct messages
+    # this used to send let anyone enumerate live session/student IDs with
+    # zero valid credentials. The specific reason is still logged server-side
+    # for diagnosability.
+    generic_failure = {"type": "AUTH_FAILED", "reason": "authentication failed"}
+
     with session_scope() as db:  # type: Session
         exam_session = db.get(ExamSession, session_id)
         if exam_session is None or exam_session.ended_at is not None:
-            await websocket.send_json({"type": "AUTH_FAILED", "reason": "exam session not found or ended"})
+            logger.info("auth rejected (session not found/ended): session_id=%s", session_id)
+            await websocket.send_json(generic_failure)
             return None
 
         student = db.get(Student, student_id)
         if student is None:
-            await websocket.send_json({"type": "AUTH_FAILED", "reason": "student not enrolled"})
+            logger.info("auth rejected (student not enrolled): student_id=%s", student_id)
+            await websocket.send_json(generic_failure)
             return None
 
         try:
             claims = verify_student_token(token, session_id, student_id)
         except TokenError as exc:
-            await websocket.send_json({"type": "AUTH_FAILED", "reason": str(exc)})
+            logger.info("auth rejected (%s): student_id=%s session_id=%s", exc, student_id, session_id)
+            await websocket.send_json(generic_failure)
             return None
 
         student_session = (
@@ -78,18 +90,15 @@ async def _authenticate(websocket: WebSocket) -> tuple[str, str, str] | None:
             .one_or_none()
         )
         if student_session is None:
-            await websocket.send_json({"type": "AUTH_FAILED", "reason": "student not enrolled in this session"})
+            logger.info("auth rejected (no enrollment row): student_id=%s session_id=%s", student_id, session_id)
+            await websocket.send_json(generic_failure)
             return None
 
-        # Enforce single-token-per-enrollment. Re-enrolling a student mints a
-        # new jti and overwrites this column, so any previously issued token
-        # stops working immediately instead of staying valid for the rest of
-        # its TTL - which is the whole point of storing token_jti.
-        if student_session.token_jti and claims.get("jti") != student_session.token_jti:
+        try:
+            verify_token_not_superseded(claims, student_session.token_jti)
+        except TokenError as exc:
             logger.warning("rejected superseded token for student_id=%s session_id=%s", student_id, session_id)
-            await websocket.send_json(
-                {"type": "AUTH_FAILED", "reason": "token superseded by a newer enrollment; request a fresh token"}
-            )
+            await websocket.send_json(generic_failure)
             return None
 
         student_session.status = "online"
@@ -233,5 +242,12 @@ async def student_websocket(websocket: WebSocket) -> None:
     except WebSocketDisconnect:
         logger.info("student disconnected student_id=%s session_id=%s", student_id, session_id)
     finally:
-        await manager.disconnect_student(student_id, session_id, websocket)
-        _mark_offline(student_id, session_id)
+        disconnected = await manager.disconnect_student(student_id, session_id, websocket)
+        # Only persist "offline" if this really was the live connection going
+        # away. On a fast reconnect, disconnect_student() ignores the stale
+        # socket and returns False - unconditionally marking the DB offline
+        # here anyway would overwrite a status a newer, still-connected
+        # socket had just set back to "online", corrupting the attendance
+        # record for a student who never actually left.
+        if disconnected:
+            _mark_offline(student_id, session_id)

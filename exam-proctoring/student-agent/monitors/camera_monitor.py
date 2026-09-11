@@ -280,6 +280,7 @@ class CameraMonitor:
             self._multi_face_since = None
             self._face_away_since = None
             self._look_away_since = None
+            self._look_away_direction = None
             self._on_state_change("NO_FACE")
             if self._no_face_since is None:
                 self._no_face_since = now
@@ -298,6 +299,7 @@ class CameraMonitor:
         if face_count > 1:
             self._face_away_since = None
             self._look_away_since = None
+            self._look_away_direction = None
             self._on_state_change("MULTIPLE_FACES")
             if self._multi_face_since is None:
                 self._multi_face_since = now
@@ -311,6 +313,7 @@ class CameraMonitor:
         mesh_result = face_mesh.process(rgb)
         if not mesh_result.multi_face_landmarks:
             self._look_away_since = None
+            self._look_away_direction = None
             self._on_state_change("FACE_ANGLE_UNCLEAR")
             if self._face_away_since is None:
                 self._face_away_since = now
@@ -326,6 +329,7 @@ class CameraMonitor:
         if pose is None:
             self._on_state_change("ONE_FACE")
             self._look_away_since = None
+            self._look_away_direction = None
             return
 
         direction, yaw_deg, pitch_deg = pose

@@ -16,10 +16,10 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
-from auth.tokens import TokenError, require_admin_api_key, verify_student_token
+from auth.tokens import TokenError, require_admin_api_key, verify_student_token, verify_token_not_superseded
 from config import settings
 from database.db import get_db
-from models.models import Event, Evidence
+from models.models import Event, Evidence, StudentSession
 
 logger = logging.getLogger("proctoring.api.evidence")
 router = APIRouter(prefix="/api/evidence", tags=["evidence"])
@@ -47,7 +47,18 @@ async def upload_evidence(
     db: Session = Depends(get_db),
 ) -> dict:
     try:
-        verify_student_token(token, session_id, student_id)
+        claims = verify_student_token(token, session_id, student_id)
+        # The WebSocket auth path already revokes a token the moment a
+        # student is re-enrolled (a new jti overwrites the old one); this
+        # endpoint used to skip that check entirely, so a token a proctor
+        # believed they'd revoked stayed usable here for its full remaining
+        # TTL (up to student_token_ttl_minutes).
+        student_session = (
+            db.query(StudentSession).filter_by(session_id=session_id, student_id=student_id).one_or_none()
+        )
+        if student_session is None:
+            raise TokenError("student not enrolled in this session")
+        verify_token_not_superseded(claims, student_session.token_jti)
     except TokenError as exc:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
 

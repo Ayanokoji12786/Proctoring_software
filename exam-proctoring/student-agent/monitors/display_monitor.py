@@ -129,28 +129,24 @@ class WindowsDisplayMonitor(DisplayMonitor):
         except Exception as exc:
             return DisplayState(0, False, False, False, f"failed to read monitor count: {exc}")
 
+        # Clone (mirrored) vs. extend topology on Windows can only be told
+        # apart reliably via QueryDisplayConfig's DISPLAYCONFIG_PATH_INFO
+        # array (comparing source ids across active paths), which needs
+        # struct marshalling this module doesn't implement. A prior version
+        # of this code called GetDisplayConfigBufferSizes and treated mere
+        # success as "topology known" - but that call only reports buffer
+        # sizes, it doesn't determine clone-vs-extend, so it was marking
+        # topology "known" (and mirrored confidently False) on virtually
+        # every Windows build regardless of actual configuration. Being
+        # honest about not knowing is safer than a confident wrong answer.
         mirrored = False
         topology_known = False
-        try:
-            num_paths = ctypes.c_uint32()
-            num_modes = ctypes.c_uint32()
-            result = user32.GetDisplayConfigBufferSizes(
-                self.QDC_ONLY_ACTIVE_PATHS, ctypes.byref(num_paths), ctypes.byref(num_modes)
-            )
-            if result == self.ERROR_SUCCESS:
-                # DISPLAYCONFIG_TOPOLOGY_ID returned via QueryDisplayConfig's 5th out-param
-                # when flags == QDC_DATABASE_CURRENT is more direct, but requires larger
-                # struct marshalling; as a practical proxy we treat "monitor count > 1"
-                # combined with identical path counts as an extend/clone signal only,
-                # and leave exact clone-detection to the simpler heuristic below.
-                topology_known = True
-        except Exception:
-            topology_known = False
 
         extended = display_count > 1 and not mirrored
         note = None if topology_known else (
             "monitor count detected, but exact clone-vs-extend topology could not be "
-            "determined on this Windows build; treating multiple monitors as extended"
+            "determined on this Windows build; treating multiple monitors as extended "
+            "rather than assuming mirroring is absent"
         )
         return DisplayState(
             display_count=display_count,
